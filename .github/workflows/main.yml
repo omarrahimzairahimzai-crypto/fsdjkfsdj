@@ -1,0 +1,244 @@
+name: Windows RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+
+      # ============================================================
+      # 1. CONNECT TAILSCALE
+      # ============================================================
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      # ============================================================
+      # 2. CONFIGURE RDP
+      # ============================================================
+      - name: Configure RDP
+        shell: powershell
+        run: |
+          $username = "RDPUser"
+          $password = "${{ secrets.RDP_PASSWORD }}"
+
+          if ([string]::IsNullOrWhiteSpace($password)) {
+              Write-Error "RDP_PASSWORD secret is missing."
+              exit 1
+          }
+
+          Write-Host "Creating/configuring RDP account..."
+
+          $securePassword = ConvertTo-SecureString `
+              $password `
+              -AsPlainText `
+              -Force
+
+          $user = Get-LocalUser `
+              -Name $username `
+              -ErrorAction SilentlyContinue
+
+          if ($user) {
+
+              Write-Host "User already exists. Updating password..."
+
+              Set-LocalUser `
+                  -Name $username `
+                  -Password $securePassword
+
+          }
+          else {
+
+              Write-Host "Creating new RDP user..."
+
+              New-LocalUser `
+                  -Name $username `
+                  -Password $securePassword `
+                  -PasswordNeverExpires `
+                  -AccountNeverExpires `
+                  -Description "Temporary RDP User"
+          }
+
+          # Add user to Remote Desktop Users
+          Add-LocalGroupMember `
+              -Group "Remote Desktop Users" `
+              -Member $username `
+              -ErrorAction SilentlyContinue
+
+          # Add administrator privileges
+          Add-LocalGroupMember `
+              -Group "Administrators" `
+              -Member $username `
+              -ErrorAction SilentlyContinue
+
+          # Enable Remote Desktop
+          Set-ItemProperty `
+              -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+              -Name "fDenyTSConnections" `
+              -Value 0
+
+          # Enable RDP firewall rules
+          Enable-NetFirewallRule `
+              -DisplayGroup "Remote Desktop"
+
+          # Configure Remote Desktop service
+          Set-Service `
+              -Name "TermService" `
+              -StartupType Automatic
+
+          Start-Service `
+              -Name "TermService"
+
+          Write-Host ""
+          Write-Host "RDP CONFIGURATION COMPLETE"
+
+      # ============================================================
+      # 3. GET NEW TAILSCALE IP
+      # ============================================================
+      - name: Get Tailscale IP
+        shell: powershell
+        run: |
+
+          Write-Host "Getting Tailscale IPv4..."
+
+          $ip = (tailscale ip -4).Trim()
+
+          if ([string]::IsNullOrWhiteSpace($ip)) {
+              Write-Error "Tailscale IPv4 address was not found."
+              exit 1
+          }
+
+          "TAILSCALE_IP=$ip" |
+              Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "       NEW TAILSCALE RDP SERVER"
+          Write-Host "=========================================="
+          Write-Host "Tailscale IP : $ip"
+          Write-Host "RDP Address  : $ip`:3389"
+          Write-Host "Username     : RDPUser"
+          Write-Host "Password     : RDP_PASSWORD Secret"
+          Write-Host "=========================================="
+
+      # ============================================================
+      # 4. CHECK TAILSCALE
+      # ============================================================
+      - name: Check Tailscale
+        shell: powershell
+        run: |
+
+          Write-Host ""
+          Write-Host "===== TAILSCALE STATUS ====="
+
+          tailscale status
+
+          Write-Host ""
+          Write-Host "===== TAILSCALE IP ====="
+
+          tailscale ip -4
+
+      # ============================================================
+      # 5. CHECK RDP SERVICE AND PORT
+      # ============================================================
+      - name: Check RDP
+        shell: powershell
+        run: |
+
+          Write-Host ""
+          Write-Host "===== REMOTE DESKTOP SERVICE ====="
+
+          $service = Get-Service `
+              -Name "TermService"
+
+          $service |
+              Format-Table `
+              Name,
+              Status,
+              StartType `
+              -AutoSize
+
+          if ($service.Status -ne "Running") {
+              Write-Error "TermService is not running."
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "===== TCP 3389 ====="
+
+          $listener = Get-NetTCPConnection `
+              -LocalPort 3389 `
+              -State Listen `
+              -ErrorAction SilentlyContinue
+
+          if (-not $listener) {
+              Write-Error "TCP 3389 is NOT listening."
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "TCP 3389 IS LISTENING."
+
+          $listener |
+              Format-Table `
+              LocalAddress,
+              LocalPort,
+              State,
+              OwningProcess `
+              -AutoSize
+
+      # ============================================================
+      # 6. FINAL INFORMATION
+      # ============================================================
+      - name: Show RDP Information
+        shell: powershell
+        run: |
+
+          $ip = $env:TAILSCALE_IP
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "             RDP IS READY"
+          Write-Host "=========================================="
+          Write-Host ""
+          Write-Host "RDP Address:"
+          Write-Host "$ip`:3389"
+          Write-Host ""
+          Write-Host "Username:"
+          Write-Host "RDPUser"
+          Write-Host ""
+          Write-Host "Password:"
+          Write-Host "The value stored in RDP_PASSWORD"
+          Write-Host ""
+          Write-Host "=========================================="
+
+      # ============================================================
+      # 7. KEEP RUNNER ALIVE
+      # ============================================================
+      - name: Keep RDP Alive
+        shell: powershell
+        run: |
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "          RDP IS NOW ACTIVE"
+          Write-Host "=========================================="
+          Write-Host ""
+          Write-Host "RDP Address: $env:TAILSCALE_IP`:3389"
+          Write-Host ""
+
+          while ($true) {
+
+              $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+              Write-Host "[$time] RDP 3389 is active."
+
+              Start-Sleep -Seconds 60
+          }
